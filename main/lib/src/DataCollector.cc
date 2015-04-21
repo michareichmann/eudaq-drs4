@@ -168,7 +168,8 @@ namespace eudaq {
       unsigned tluev = 0;
       for (size_t i = 0; i < m_buffer.size(); ++i) {
         if (m_buffer[i].events.front()->GetRunNumber() != m_runnumber) {
-          EUDAQ_ERROR("Run number mismatch in event " + to_string(ev.GetEventNumber()));
+          EUDAQ_ERROR("Run number mismatch in event " + to_string(ev.GetEventNumber() +" "
+        		  +to_string(m_buffer[i].events.front()->GetRunNumber() )+"/"+to_string(m_runnumber)));
         }
         if ((m_buffer[i].events.front()->GetEventNumber() != m_eventnumber) && (m_buffer[i].events.front()->GetEventNumber() != m_eventnumber - 1)) {
           if (ev.GetEventNumber() % 1000 == 0) {
