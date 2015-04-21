@@ -4,6 +4,7 @@
 #include "eudaq/StringEvent.hh"
 #include "eudaq/RawDataEvent.hh"
 #include "eudaq/AidaPacket.hh"
+#include "eudaq/PyPacket.hh"
 #include "eudaq/Utils.hh"
 #include "eudaq/OptionParser.hh"
 
@@ -20,13 +21,23 @@ class PyProducer : public eudaq::Producer {
   public:
     PyProducer(const std::string & name, const std::string & runcontrol)
       : eudaq::Producer(name, runcontrol), m_internalstate(Init), m_name(name), m_run(0), m_evt(0), m_config(NULL) {}
-  
-    void SendEvent(uint8_t* data, size_t size) {
+    void SendEvent(uint64_t* data, size_t size) {
       RawDataEvent ev(m_name, m_run, ++m_evt);
-      ev.AddBlock(0, data, size);
-      eudaq::DataSender::SendEvent(ev);
-    }
-
+        ev.AddBlock(0, data, size);
+        eudaq::DataSender::SendEvent(ev);
+      }
+    void SendPacket( uint64_t* meta_data, size_t meta_data_size, uint64_t* data, size_t data_size ) {
+    	AidaPacket packet( AidaPacket::str2type( "-pytest-" ), 0 );
+    	for ( int i = 0; i < meta_data_size; i++ )
+    		packet.GetMetaData().getArray().push_back( meta_data[i] );
+    	packet.SetData( data, data_size );
+        eudaq::DataSender::SendPacket(packet);
+      }
+    void sendPacket() {
+    	eudaq::PyPacket * p = eudaq::PyPacket::getNextToSend();
+    	if ( p )
+    		eudaq::DataSender::SendPacket( *(p->packet) );
+      }
     virtual void OnConfigure(const eudaq::Configuration & param) {
       std::cout << "[PyProducer] Received Configuration" << std::endl;
       m_config = new eudaq::Configuration(param);
@@ -40,7 +51,6 @@ class PyProducer : public eudaq::Producer {
 	SetStatus(eudaq::Status::LVL_OK, "Configured (" + m_config->Name() + ")");
       }
     }
-
     virtual void OnStartRun(unsigned param) {
       m_run = param;
       m_evt = 0;
@@ -148,7 +158,13 @@ private:
 extern "C" {
   DLLEXPORT PyProducer* PyProducer_new(char *name, char *rcaddress){return new PyProducer(std::string(name),std::string(rcaddress));}
   // functions for I/O
-  DLLEXPORT void PyProducer_SendEvent(PyProducer *pp, uint8_t* buffer, size_t size){pp->SendEvent(buffer,size);}
+  DLLEXPORT void PyProducer_SendEvent(PyProducer *pp, uint64_t* buffer, size_t size){pp->SendEvent(buffer,size);}
+  DLLEXPORT void PyProducer_SendPacket(PyProducer *pp, uint64_t* meta_data, size_t meta_data_size, uint64_t* data, size_t data_size ) {
+	  pp->SendPacket( meta_data, meta_data_size, data, data_size );
+  }
+  DLLEXPORT void PyProducer_sendPacket(PyProducer *pp ) {
+	  pp->sendPacket();
+  }
   DLLEXPORT char* PyProducer_GetConfigParameter(PyProducer *pp, char *item){
     std::string value = pp->GetConfigParameter(std::string(item));
     // convert string to char*

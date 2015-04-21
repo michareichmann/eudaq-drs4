@@ -5,9 +5,9 @@ CMAKE_MINIMUM_REQUIRED(VERSION 2.6 FATAL_ERROR)
 PROJECT( EUDAQ )
 
 # project version
-SET( ${PROJECT_NAME}_VERSION_MAJOR 1 )
-SET( ${PROJECT_NAME}_VERSION_MINOR 4 )
-SET( ${PROJECT_NAME}_VERSION_PATCH 5 )
+SET( ${PROJECT_NAME}_VERSION_MAJOR 2 )
+SET( ${PROJECT_NAME}_VERSION_MINOR 0 )
+SET( ${PROJECT_NAME}_VERSION_PATCH 0 )
 
 LIST ( APPEND CMAKE_CXX_FLAGS "-fPIC -O2" )
 LIST ( APPEND CMAKE_LD_FLAGS "-fPIC -O2" )
@@ -94,11 +94,6 @@ IF(BUILD_nreader)
   set(ADDITIONAL_LIBRARIES ${EUTELESCOPE_LIBRARIES} DetectorDescriptons)
 ENDIF()
 
-find_package(Protobuf)
-option(GEN_proto "Gennerate protobuf files?" OFF)
-IF(GEN_proto)
-  SET(ADDITIONAL_LIBRARIES ${ADDITIONAL_LIBRARIES} ${PROTOBUF_LIBRARIES})
-ENDIF()
 
 # SET THE RPATH SO THAT OUR EXECUTABLES FIND THE EUDAQ LIBRARY EVEN WHEN INSTALLED INTO NON-DEFAULT LOCATIONS
 # see http://www.cmake.org/Wiki/CMake_RPATH_handling
@@ -137,9 +132,15 @@ IF(BUILD_main)
 ENDIF()
 
 # build EUDAQ python exe bindings
-option(BUILD_python "Compile Python EUDAQ binding library?" OFF)
+option(BUILD_python "Compile Python EUDAQ binding library?" ON)
 IF(BUILD_python)
   add_subdirectory(main/python)
+ENDIF()
+
+# build EUDAQ pybindgen bindings
+option(BUILD_pybindgen "Compile pybindgen binding libraries?" OFF)
+IF(BUILD_pybindgen)
+  add_subdirectory(etc/pybindgen)
 ENDIF()
 
 # build native reader used for data conversion into LCIO
@@ -159,11 +160,22 @@ IF(BUILD_onlinemon)
   add_subdirectory(monitors/onlinemon)
 ENDIF()
 
+# build resender Producer
+option(BUILD_resender "Compile resender Producer?" OFF)
+IF(BUILD_resender)
+  add_subdirectory(reSendProducer)
+ENDIF()
 
 # build Offline Monitor
 option(BUILD_offlinemon "Compile Offline Monitor executable (requires ROOT)?" OFF)
 IF(BUILD_offlinemon)
   add_subdirectory(monitors/offlinemon)
+ENDIF()
+
+# build Metadata Monitor
+option(BUILD_metamon "Compile MetaData Monitor executable" OFF)
+IF(BUILD_metamon)
+  add_subdirectory(monitors/metamon)
 ENDIF()
 
 

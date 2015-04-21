@@ -1,11 +1,16 @@
+#include <iostream>
+#include <ostream>
+#include <thread>
 #include "eudaq/DataCollector.hh"
 #include "eudaq/TransportFactory.hh"
 #include "eudaq/BufferSerializer.hh"
 #include "eudaq/DetectorEvent.hh"
 #include "eudaq/Logger.hh"
 #include "eudaq/Utils.hh"
-#include <iostream>
-#include <ostream>
+#include "eudaq/PluginManager.hh"
+#include "eudaq/JSONimpl.hh"
+
+#include "config.h"
 
 namespace eudaq {
 
@@ -20,14 +25,17 @@ namespace eudaq {
   } // anonymous namespace
 
   DataCollector::DataCollector(const std::string & name, const std::string & runcontrol, const std::string & listenaddress, const std::string & runnumberfile) :
-    CommandReceiver("DataCollector", name, runcontrol, false), m_runnumberfile(runnumberfile), m_done(false), m_listening(true), m_dataserver(TransportFactory::CreateServer(listenaddress)), m_thread(), m_numwaiting(0), m_itlu((size_t) -1), m_runnumber(
-     ReadFromFile(runnumberfile, 0U)), m_eventnumber(0), m_runstart(0) {
+    CommandReceiver("DataCollector", name, runcontrol, false),
+    m_runnumberfile(runnumberfile), m_name( name ), m_done(false), m_listening(true),
+    m_dataserver(TransportFactory::CreateServer(listenaddress)),
+    m_thread(), m_numwaiting(0), m_itlu((size_t) -1), m_runnumber( ReadFromFile(runnumberfile, 0U)), m_eventnumber(0), m_runstart(0), m_packetNumberLastPacket( 0 )
+  {
       m_dataserver->SetCallback(TransportCallback(this, &DataCollector::DataHandler));
       EUDAQ_DEBUG("Instantiated datacollector with name: " + name);
       m_thread=std::unique_ptr<std::thread>(new std::thread(DataCollector_thread,this));
       EUDAQ_DEBUG("Listen address=" + to_string(m_dataserver->ConnectionString()));
       CommandReceiver::StartThread();
-    }
+  }
 
   DataCollector::~DataCollector() {
     m_done = true;
@@ -68,7 +76,7 @@ namespace eudaq {
 
   void DataCollector::OnConfigure(const Configuration & param) {
     m_config = param;
-    m_writer =  std::shared_ptr<eudaq::FileWriter>(FileWriterFactory::Create(m_config.Get("FileType", "")));
+    m_writer =  std::unique_ptr<eudaq::AidaFileWriter>(AidaFileWriterFactory::Create(m_config.Get("FileType", "")));
     m_writer->SetFilePattern(m_config.Get("FilePattern", ""));
   }
 
@@ -80,7 +88,7 @@ namespace eudaq {
       if (!m_writer) {
         EUDAQ_THROW("You must configure before starting a run");
       }
-      m_writer->StartRun(runnumber);
+      m_writer->StartRun( m_name, runnumber, buildJsonConfigHeader( runnumber ) );
       WriteToFile(m_runnumberfile, runnumber);
       m_runnumber = runnumber;
       m_eventnumber = 0;
@@ -107,13 +115,17 @@ namespace eudaq {
     //m_ser = counted_ptr<FileSerializer>();
   }
 
-  void DataCollector::OnReceive(const ConnectionInfo & id, std::shared_ptr<Event> ev) {
+  void DataCollector::OnReceive(const ConnectionInfo & id, std::shared_ptr<AidaPacket> packet ) {
+	  WritePacket( packet );
+  }
+
+
+
+  void DataCollector::OnReceive(const ConnectionInfo & id, std::shared_ptr<Event> ev ) {
+    //std::cout << "Received Event from " << id << ": " << *ev << std::endl;
+
     Info & inf = m_buffer[GetInfo(id)];
     inf.events.push_back(ev);
-
-    // Print if the received event is the EORE of this producer:
-    if(inf.events.back()->IsEORE()) std::cout << "Received EORE Event from " << id << ": " << *ev << std::endl;
-
     bool tmp = false;
     if (inf.events.size() == 1) {
       m_numwaiting++;
@@ -121,8 +133,8 @@ namespace eudaq {
         tmp = true;
       }
     }
-
     //std::cout << "Waiting buffers: " << m_numwaiting << " out of " << m_buffer.size() << std::endl;
+
     if (tmp)
       OnCompleteEvent();
   }
@@ -137,12 +149,11 @@ namespace eudaq {
       m_status.SetTag("FILEBYTES", to_string(m_writer->FileBytes()));
   }
 
+
   void DataCollector::OnCompleteEvent() {
     bool more = true;
-    bool found_bore = false;
-
     while (more) {
-      if (m_eventnumber < 10 || m_eventnumber % 1000 == 0) {
+      if (m_eventnumber < 10 || m_eventnumber % 100 == 0) {
         std::cout << "Complete Event: " << m_runnumber << "." << m_eventnumber << std::endl;
       }
       unsigned n_run = m_runnumber, n_ev = m_eventnumber;
@@ -178,31 +189,42 @@ namespace eudaq {
       if (ev.IsBORE()) {
         ev.SetTag("STARTTIME", m_runstart.Formatted());
         ev.SetTag("CONFIG", to_string(m_config));
-	found_bore = true;
       }
       if (ev.IsEORE()) {
         ev.SetTag("STOPTIME", Time::Current().Formatted());
         EUDAQ_INFO("Run " + to_string(ev.GetRunNumber()) + ", EORE = " + to_string(ev.GetEventNumber()));
       }
-      if (m_writer.get()) {
-	try{
-	  m_writer->WriteEvent(ev);
-	}
-	catch(const Exception & e){
-	  std::string msg = "Exception writing to file: "; msg+= e.what();
-	  EUDAQ_ERROR(msg);
-	  SetStatus(Status::LVL_ERROR, msg);
-	}
-      } else {
-        EUDAQ_ERROR("Event received before start of run");
-      }
-
-      // Only increase the internal event counter for non-BORE events.
-      // This is required since all producers start sending data with event ID 0
-      // but the data collector would already be at 1, since BORE was 0.
-      if(!found_bore) ++m_eventnumber;
+      WriteEvent( ev );
     }
   }
+
+
+  void DataCollector::WriteEvent( const DetectorEvent & ev ) {
+	  auto packet = std::shared_ptr<AidaPacket>( new EventPacket( ev ) );
+	  packet->SetPacketNumber( ++m_packetNumberLastPacket );
+	  WritePacket( packet );
+	  // std::cout << ev << std::endl;
+	  ++m_eventnumber;
+  }
+
+
+  void DataCollector::WritePacket( std::shared_ptr<AidaPacket> packet ) {
+	  if (m_writer.get()) {
+		  try {
+			  m_packetNumberLastPacket = packet->GetPacketNumber();
+			  m_writer->WritePacket( packet );
+		  } catch(const Exception & e) {
+			  std::string msg = "Exception writing to file: ";
+			  msg += e.what();
+			  EUDAQ_ERROR(msg);
+			  SetStatus(Status::LVL_ERROR, msg);
+		  }
+	  } else {
+		  EUDAQ_ERROR("Event received before start of run");
+	  }
+  }
+
+
 
   size_t DataCollector::GetInfo(const ConnectionInfo & id) {
     for (size_t i = 0; i < m_buffer.size(); ++i) {
@@ -267,17 +289,24 @@ namespace eudaq {
           ev.id.SetState(1); // successfully identified
           OnConnect(ev.id);
         } else {
-          //std::cout << "Receive: " << ev.id << " " << ev.packet.size() << std::endl;
-          //for (size_t i = 0; i < 8 && i < ev.packet.size(); ++i) {
-          //    std::cout << to_hex(ev.packet[i], 2) << ' ';
-          //}
-          //std::cout << ")" << std::endl;
-          BufferSerializer ser(ev.packet.begin(), ev.packet.end());
-          //std::cout << "Deserializing" << std::endl;
-          std::shared_ptr<Event> event(EventFactory::Create(ser));
-          //std::cout << "Done" << std::endl;
-          OnReceive(ev.id, event);
-          //std::cout << "End" << std::endl;
+        	if ( ev.packet.find( AidaPacket::identifier().string ) == 0 ) {
+        		BufferSerializer ser(ev.packet.begin(), ev.packet.end());
+        		std::shared_ptr<AidaPacket> packet( PacketFactory::Create( ser ) );
+        		OnReceive( ev.id, packet );
+        		// this is a packet
+        	} else {
+        		//std::cout << "Receive: " << ev.id << " " << ev.packet.size() << std::endl;
+        		//for (size_t i = 0; i < 8 && i < ev.packet.size(); ++i) {
+        		//    std::cout << to_hex(ev.packet[i], 2) << ' ';
+        		//}
+        		//std::cout << ")" << std::endl;
+        		BufferSerializer ser(ev.packet.begin(), ev.packet.end());
+        		//std::cout << "Deserializing" << std::endl;
+        		std::shared_ptr<Event> event(EventFactory::Create(ser));
+        		//std::cout << "Done" << std::endl;
+        		OnReceive(ev.id, event );
+        		//std::cout << "End" << std::endl;
+        	}
         }
         break;
       default:
@@ -295,6 +324,28 @@ namespace eudaq {
     } catch (...) {
       std::cout << "Error: Uncaught unrecognised exception: \n" << "DataThread is dying..." << std::endl;
     }
+  }
+
+
+  std::shared_ptr<JSON> DataCollector::buildJsonConfigHeader( unsigned int runnumber ) {
+	  auto J = JSON::Create();
+
+	  jsoncons::json& header = JSONimpl::get( J.get() );
+	  header["runnumber"] = runnumber;
+	  header["package_name"] = PACKAGE_NAME;
+	  header["package_version"] = PACKAGE_VERSION;
+	  header["date"] = Time::Current().Formatted();
+	  header["schema"] = AidaPacket::getCurrentSchema();
+
+	  header["sources"] = jsoncons::json::an_array;
+	  for ( auto info : m_buffer ) {
+		  jsoncons::json src;
+		  src["type"] = info.id->GetType();
+		  src["name"] = info.id->GetName();
+		  header["sources"].add( src );
+	  }
+
+	  return J;
   }
 
 }
